@@ -5,46 +5,42 @@ import numpy as np
 # Set page configuration
 st.set_page_config(page_title="Caliper Support Dashboard", layout="wide")
 
-def process_data(file):
-    # Load data (handles both CSV and Excel)
+def process_data(file, selected_companies):
+    # Load data
     if file.name.endswith('.csv'):
         df = pd.read_csv(file)
     else:
         df = pd.read_excel(file)
 
-    # Clean column names to avoid matching errors
+    # Clean column names
     df.columns = df.columns.str.strip()
 
     # 1. Filter for valid tickets
-    # Including "Auto Completed" as per your instruction
     df = df[df['Status'].isin(['Completed', 'Auto Completed'])]
 
-    # 2. Map Severity to P1-P4
-    # Remapping 1->P1, 2->P2, 3->P3, 4->P4
+    # 2. Filter by Selected Companies
+    if selected_companies:
+        df = df[df['Company'].isin(selected_companies)]
+
+    # 3. Map Severity to P1-P4
     sev_map = {1: 'P1', 2: 'P2', 3: 'P3', 4: 'P4'}
     df['Priority_Mapped'] = df['Severity'].map(sev_map)
 
-    # 3. Convert TAT from Minutes to Hours
+    # 4. Convert TAT from Minutes to Hours
     df['TAT_Hr'] = df['TAT'] / 60.0
 
-    # 4. Map Ticket Category to Groups (Operations vs Tech)
+    # 5. Map Ticket Category
     def map_category(cat):
         cat_str = str(cat).lower()
-        if 'operations' in cat_str:
-            return 'Operations'
-        elif 'tech' in cat_str or 'sap response' in cat_str:
-            return 'Tech'
-        elif 'development' in cat_str:
-            return 'Development'
-        elif 'enhancement' in cat_str:
-            return 'Enhancement'
-        else:
-            return 'Others'
+        if 'operations' in cat_str: return 'Operations'
+        elif 'tech' in cat_str or 'sap response' in cat_str: return 'Tech'
+        elif 'development' in cat_str: return 'Development'
+        elif 'enhancement' in cat_str: return 'Enhancement'
+        else: return 'Others'
 
     df['Category_Mapped'] = df['Ticket Category'].apply(map_category)
 
-    # 5. Grouping and Aggregation
-    # Qty Pivot
+    # 6. Grouping and Aggregation
     pivot_qty = df.pivot_table(
         index=['Category_Mapped', 'Company'],
         columns='Priority_Mapped',
@@ -52,7 +48,6 @@ def process_data(file):
         aggfunc='count'
     ).fillna(0)
 
-    # Mean TAT Pivot
     pivot_tat = df.pivot_table(
         index=['Category_Mapped', 'Company'],
         columns='Priority_Mapped',
@@ -60,7 +55,7 @@ def process_data(file):
         aggfunc='mean'
     ).fillna(0)
 
-    # 6. Build final table layout
+    # 7. Build final table
     final_df = pd.DataFrame()
     priorities = ['P1', 'P2', 'P3', 'P4']
     
@@ -70,10 +65,7 @@ def process_data(file):
         final_df[f'{p} (Qty)'] = qty_col
         final_df[f'{p} TAT (Hr)'] = tat_col
 
-    # Calculate Total Tickets per row
     final_df['Total'] = pivot_qty.sum(axis=1)
-
-    # Format the index for the dashboard
     final_df = final_df.reset_index()
     final_df.rename(columns={'Category_Mapped': 'Category', 'Company': 'Company Name'}, inplace=True)
     
@@ -81,39 +73,41 @@ def process_data(file):
 
 # --- Streamlit UI ---
 st.title("📊 Caliper Support Performance Dashboard")
-st.markdown("Upload your raw report to generate the P1-P4 Severity & TAT Analysis.")
 
-uploaded_file = st.file_uploader("Choose an Excel or CSV file", type=['csv', 'xlsx'])
+uploaded_file = st.file_uploader("Upload Caliper Report", type=['csv', 'xlsx'])
 
 if uploaded_file is not None:
-    try:
-        report_df = process_data(uploaded_file)
-        
-        st.subheader("Performance Matrix (By Company & Category)")
-        
-        # Style the table to match the requested decimal format
-        styled_df = report_df.style.format({
-            'P1 TAT (Hr)': "{:.2f}",
-            'P2 TAT (Hr)': "{:.2f}",
-            'P3 TAT (Hr)': "{:.2f}",
-            'P4 TAT (Hr)': "{:.2f}",
-            'P1 (Qty)': "{:.0f}",
-            'P2 (Qty)': "{:.0f}",
-            'P3 (Qty)': "{:.0f}",
-            'P4 (Qty)': "{:.0f}",
-            'Total': "{:.0f}"
-        })
-        
-        st.table(styled_df)
+    # Peek at the file to get unique companies for the sidebar
+    temp_df = pd.read_csv(uploaded_file) if uploaded_file.name.endswith('.csv') else pd.read_excel(uploaded_file)
+    temp_df.columns = temp_df.columns.str.strip()
+    available_companies = sorted(temp_df['Company'].dropna().unique().tolist())
+    
+    # Sidebar Filter
+    st.sidebar.header("Filter Options")
+    selected_companies = st.sidebar.multiselect(
+        "Select Companies to View:",
+        options=available_companies,
+        default=available_companies
+    )
 
-        # Export button
-        csv = report_df.to_csv(index=False).encode('utf-8')
-        st.download_button(
-            label="📥 Download Processed Report (CSV)",
-            data=csv,
-            file_name="Caliper_TAT_Report.csv",
-            mime="text/csv",
-        )
+    try:
+        # Reset file pointer for processing
+        uploaded_file.seek(0)
+        report_df = process_data(uploaded_file, selected_companies)
+        
+        st.subheader(f"Performance Matrix for {len(selected_companies)} Selected Companies")
+        
+        # Display table
+        st.table(report_df.style.format({
+            'P1 TAT (Hr)': "{:.2f}", 'P2 TAT (Hr)': "{:.2f}",
+            'P3 TAT (Hr)': "{:.2f}", 'P4 TAT (Hr)': "{:.2f}",
+            'P1 (Qty)': "{:.0f}", 'P2 (Qty)': "{:.0f}",
+            'P3 (Qty)': "{:.0f}", 'P4 (Qty)': "{:.0f}",
+            'Total': "{:.0f}"
+        }))
+
+        # Download
+        st.download_button("📥 Download Filtered CSV", report_df.to_csv(index=False), "Caliper_Filtered.csv")
 
     except Exception as e:
-        st.error(f"Error processing file: {e}")
+        st.error(f"Error: {e}")
