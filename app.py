@@ -5,13 +5,7 @@ import numpy as np
 # Set page configuration
 st.set_page_config(page_title="Caliper Support Dashboard", layout="wide")
 
-def process_data(file, selected_companies):
-    # Load data
-    if file.name.endswith('.csv'):
-        df = pd.read_csv(file)
-    else:
-        df = pd.read_excel(file)
-
+def process_data(df, selected_companies):
     # Clean column names
     df.columns = df.columns.str.strip()
 
@@ -21,18 +15,24 @@ def process_data(file, selected_companies):
     # 2. Filter by Selected Companies
     if selected_companies:
         df = df[df['Company'].isin(selected_companies)]
+    
+    if df.empty:
+        return pd.DataFrame()
 
     # 3. Map Severity to P1-P4
+    # Ensure Severity is numeric before mapping
+    df['Severity'] = pd.to_numeric(df['Severity'], errors='coerce')
     sev_map = {1: 'P1', 2: 'P2', 3: 'P3', 4: 'P4'}
     df['Priority_Mapped'] = df['Severity'].map(sev_map)
 
     # 4. Convert TAT from Minutes to Hours
+    # FIX: Convert TAT to numeric, turning "-" or errors into NaN, then fill with 0
+    df['TAT'] = pd.to_numeric(df['TAT'], errors='coerce').fillna(0)
     df['TAT_Hr'] = df['TAT'] / 60.0
 
     # 5. Clean and Map Ticket Category
     def map_category(cat):
-        # Handle empty/NaN categories by defaulting to Operational Issues
-        if pd.isna(cat) or str(cat).strip() == "" or str(cat).strip() == "-":
+        if pd.isna(cat) or str(cat).strip() in ["", "-"]:
             return 'Operational Issues'
         
         cat_str = str(cat).lower().strip()
@@ -46,10 +46,12 @@ def process_data(file, selected_companies):
         elif 'develop' in cat_str:
             return 'New Development'
         else:
-            # Default fallback for any remaining unmatched strings
             return 'Operational Issues'
 
-    df['Category_Mapped'] = df['Ticket Category'].apply(map_category)
+    if 'Ticket Category' in df.columns:
+        df['Category_Mapped'] = df['Ticket Category'].apply(map_category)
+    else:
+        df['Category_Mapped'] = 'Operational Issues'
 
     # 6. Pivot Quantities
     pivot_qty = df.pivot_table(
@@ -72,10 +74,9 @@ def process_data(file, selected_companies):
     priorities = ['P1', 'P2', 'P3', 'P4']
     
     for p in priorities:
-        qty_col = pivot_qty[p] if p in pivot_qty.columns else 0
-        tat_col = pivot_tat[p] if p in pivot_tat.columns else 0
-        final_df[f'{p} (Qty)'] = qty_col
-        final_df[f'{p} TAT (Hr)'] = tat_col
+        # Check if priority exists in data, otherwise use 0
+        final_df[f'{p} (Qty)'] = pivot_qty[p] if p in pivot_qty.columns else 0
+        final_df[f'{p} TAT (Hr)'] = pivot_tat[p] if p in pivot_tat.columns else 0
 
     final_df['Total Tickets'] = pivot_qty.sum(axis=1)
     final_df = final_df.reset_index()
@@ -90,32 +91,40 @@ st.markdown("Upload your raw report to generate the P1-P4 Severity & TAT Analysi
 uploaded_file = st.file_uploader("Upload your Excel or CSV file", type=['csv', 'xlsx'])
 
 if uploaded_file is not None:
-    # Sidebar Logic
-    temp_df = pd.read_csv(uploaded_file) if uploaded_file.name.endswith('.csv') else pd.read_excel(uploaded_file)
-    temp_df.columns = temp_df.columns.str.strip()
-    all_companies = sorted(temp_df['Company'].dropna().unique().tolist())
-    
-    st.sidebar.header("Dashboard Filters")
-    selected_companies = st.sidebar.multiselect("Select Companies:", options=all_companies, default=all_companies)
-
+    # Read file ONCE to avoid "file closed" errors
     try:
-        uploaded_file.seek(0)
-        report_df = process_data(uploaded_file, selected_companies)
+        if uploaded_file.name.endswith('.csv'):
+            raw_df = pd.read_csv(uploaded_file)
+        else:
+            raw_df = pd.read_excel(uploaded_file)
         
-        st.subheader(f"Performance Report")
+        raw_df.columns = raw_df.columns.str.strip()
         
-        # Display table
-        st.table(report_df.style.format({
-            'P1 TAT (Hr)': "{:.2f}", 'P2 TAT (Hr)': "{:.2f}",
-            'P3 TAT (Hr)': "{:.2f}", 'P4 TAT (Hr)': "{:.2f}",
-            'P1 (Qty)': "{:.0f}", 'P2 (Qty)': "{:.0f}",
-            'P3 (Qty)': "{:.0f}", 'P4 (Qty)': "{:.0f}",
-            'Total Tickets': "{:.0f}"
-        }))
+        # Sidebar Logic
+        all_companies = sorted(raw_df['Company'].dropna().unique().tolist())
+        st.sidebar.header("Dashboard Filters")
+        selected_companies = st.sidebar.multiselect("Select Companies:", options=all_companies, default=all_companies)
 
-        # Export button
-        csv_data = report_df.to_csv(index=False).encode('utf-8')
-        st.download_button(label="📥 Download Filtered Report (CSV)", data=csv_data, file_name="Caliper_TAT_Report.csv", mime="text/csv")
+        # Process the already loaded dataframe
+        report_df = process_data(raw_df.copy(), selected_companies)
+        
+        if report_df.empty:
+            st.warning("No data found for the selected filters.")
+        else:
+            st.subheader(f"Performance Report")
+            
+            # Format and display table
+            st.table(report_df.style.format({
+                'P1 TAT (Hr)': "{:.2f}", 'P2 TAT (Hr)': "{:.2f}",
+                'P3 TAT (Hr)': "{:.2f}", 'P4 TAT (Hr)': "{:.2f}",
+                'P1 (Qty)': "{:.0f}", 'P2 (Qty)': "{:.0f}",
+                'P3 (Qty)': "{:.0f}", 'P4 (Qty)': "{:.0f}",
+                'Total Tickets': "{:.0f}"
+            }))
+
+            # Export button
+            csv_data = report_df.to_csv(index=False).encode('utf-8')
+            st.download_button(label="📥 Download Filtered Report (CSV)", data=csv_data, file_name="Caliper_TAT_Report.csv", mime="text/csv")
 
     except Exception as e:
         st.error(f"Error: {e}")
